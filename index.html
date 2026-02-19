@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<title>Biljard V3</title>
+
+<style>
+html,body{
+  margin:0;
+  padding:0;
+  height:100vh;
+  overflow:hidden;
+  font-family:system-ui;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  transition:background 0.3s;
+}
+
+body.blueTurn{ background:#0d3b66; }
+body.orangeTurn{ background:#7a3e00; }
+
+#menu{
+  text-align:center;
+}
+
+#menu button{
+  font-size:28px;
+  padding:20px 40px;
+  margin:20px;
+}
+
+canvas{
+  background:#176b3a;
+  border-radius:25px;
+  box-shadow:0 0 50px rgba(0,0,0,0.6);
+  touch-action:none;
+  display:none;
+}
+
+#gameOver{
+  position:absolute;
+  font-size:40px;
+  color:white;
+  display:none;
+}
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <h1>Välj läge</h1>
+  <button onclick="startGame('normal')">🎱 Normal</button>
+  <button onclick="startGame('assist')">🌟 Hjälpläge</button>
+</div>
+
+<canvas id="table"></canvas>
+<div id="gameOver">Spelet är slut! Uppdatera sidan.</div>
+
+<script>
+document.addEventListener("contextmenu", e=>e.preventDefault());
+
+const canvas=document.getElementById("table");
+const ctx=canvas.getContext("2d");
+const gameOverText=document.getElementById("gameOver");
+
+const balls=[];
+const pockets=[];
+const radius=18;
+
+let friction,restitution,powerScale,pocketSize,assistStrength;
+let currentTurn="blue";
+let aiming=false;
+let startX,startY;
+let lastShot=false;
+let isMoving=false;
+let pocketedThisTurn=false;
+let gameOver=false;
+
+/* ===== LJUD ===== */
+const audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+
+function playClick(){
+
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+
+  osc.type = "triangle";   // mjukare än square
+
+  // lite variation i ton
+  osc.frequency.value = 240 + Math.random()*40;
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+
+  gain.gain.setValueAtTime(0.08, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+
+  osc.start(now);
+  osc.stop(now + 0.03);
+}
+
+
+/* ===== START ===== */
+function startGame(mode){
+  document.getElementById("menu").style.display="none";
+  canvas.style.display="block";
+  setMode(mode);
+  resize();
+  createPockets();
+  createBalls();
+  document.body.className="blueTurn";
+}
+
+/* ===== MODE ===== */
+function setMode(mode){
+  if(mode==="normal"){
+    friction=0.985;
+    restitution=0.95;
+    powerScale=0.14;
+    pocketSize=32;
+    assistStrength=0;
+  }else{
+    friction=0.975;
+    restitution=0.92;
+    powerScale=0.11;
+    pocketSize=40;
+    assistStrength=0.01;
+  }
+}
+
+/* ===== RESIZE ===== */
+function resize(){
+  const width=window.innerWidth*0.9;
+  canvas.width=width;
+  canvas.height=width*0.55;
+}
+
+/* ===== POCKETS ===== */
+function createPockets(){
+  const w=canvas.width;
+  const h=canvas.height;
+  pockets.length=0;
+  pockets.push({x:0,y:0,r:pocketSize});
+  pockets.push({x:w/2,y:0,r:pocketSize});
+  pockets.push({x:w,y:0,r:pocketSize});
+  pockets.push({x:0,y:h,r:pocketSize});
+  pockets.push({x:w/2,y:h,r:pocketSize});
+  pockets.push({x:w,y:h,r:pocketSize});
+}
+
+/* ===== BALL ===== */
+function Ball(x,y,color,type){
+  this.x=x;
+  this.y=y;
+  this.vx=0;
+  this.vy=0;
+  this.color=color;
+  this.type=type;
+  this.alive=true;
+}
+
+/* ===== CREATE BALLS ===== */
+function createBalls(){
+  balls.length=0;
+  const w=canvas.width;
+  const h=canvas.height;
+
+  balls.push(new Ball(w*0.25,h/2,"white","cue"));
+
+  const colors=["#f1c40f","#3498db","#e74c3c","#9b59b6",
+                "#2ecc71","#e67e22","#1abc9c"];
+
+  let startX=w*0.7;
+  let startY=h/2;
+  let index=0;
+
+  for(let row=0;row<5;row++){
+    for(let col=0;col<=row;col++){
+      if(index>=15) break;
+      let x=startX+row*(radius*2+4);
+      let y=startY - row*radius + col*(radius*2+4);
+      let type=index<7?"solid":"stripe";
+      let color=index===14?"black":colors[index%7];
+      balls.push(new Ball(x,y,color,type));
+      index++;
+    }
+  }
+}
+
+/* ===== DRAW ===== */
+function drawBall(b){
+  if(!b.alive) return;
+  ctx.beginPath();
+  ctx.arc(b.x,b.y,radius,0,Math.PI*2);
+  ctx.fillStyle=b.color;
+  ctx.fill();
+
+  if(b.type==="stripe"){
+    ctx.beginPath();
+    ctx.arc(b.x,b.y,radius*0.6,0,Math.PI*2);
+    ctx.fillStyle="white";
+    ctx.fill();
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  ctx.fillStyle="black";
+  pockets.forEach(p=>{
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  balls.forEach(drawBall);
+
+  if(aiming){
+    ctx.strokeStyle="white";
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.moveTo(startX,startY);
+    ctx.lineTo(mouseX,mouseY);
+    ctx.stroke();
+  }
+}
+
+/* ===== UPDATE ===== */
+function update(){
+  if(gameOver) return;
+
+  isMoving=false;
+
+  balls.forEach(b=>{
+    if(!b.alive) return;
+
+    b.x+=b.vx;
+    b.y+=b.vy;
+
+    b.vx*=friction;
+    b.vy*=friction;
+
+    if(Math.abs(b.vx)>0.05||Math.abs(b.vy)>0.05){
+      isMoving=true;
+    }
+
+    if(b.x<radius){b.x=radius;b.vx*=-restitution;}
+    if(b.x>canvas.width-radius){b.x=canvas.width-radius;b.vx*=-restitution;}
+    if(b.y<radius){b.y=radius;b.vy*=-restitution;}
+    if(b.y>canvas.height-radius){b.y=canvas.height-radius;b.vy*=-restitution;}
+
+    pockets.forEach(p=>{
+      const dx=b.x-p.x;
+      const dy=b.y-p.y;
+      if(Math.sqrt(dx*dx+dy*dy)<p.r){
+
+        if(b.type==="cue"){
+          b.x=canvas.width*0.25;
+          b.y=canvas.height/2;
+          b.vx=0;
+          b.vy=0;
+        }else{
+          if(b.color==="black"){
+            gameOver=true;
+            gameOverText.style.display="block";
+          }
+          b.alive=false;
+          pocketedThisTurn=true;
+        }
+      }
+    });
+  });
+
+  for(let i=0;i<balls.length;i++){
+    for(let j=i+1;j<balls.length;j++){
+
+      const a=balls[i];
+      const b=balls[j];
+      if(!a.alive||!b.alive) continue;
+
+      const dx=b.x-a.x;
+      const dy=b.y-a.y;
+      const dist=Math.sqrt(dx*dx+dy*dy);
+
+      if(dist<radius*2){
+        playClick();
+
+        const nx=dx/dist;
+        const ny=dy/dist;
+        const p=2*(a.vx*nx+a.vy*ny-b.vx*nx-b.vy*ny)/2;
+
+        a.vx-=p*nx;
+        a.vy-=p*ny;
+        b.vx+=p*nx;
+        b.vy+=p*ny;
+
+        const overlap=radius*2-dist;
+        a.x-=nx*overlap/2;
+        a.y-=ny*overlap/2;
+        b.x+=nx*overlap/2;
+        b.y+=ny*overlap/2;
+      }
+    }
+  }
+
+  if(!isMoving && lastShot){
+    if(!pocketedThisTurn){
+      currentTurn=currentTurn==="blue"?"orange":"blue";
+      document.body.className=currentTurn+"Turn";
+    }
+    pocketedThisTurn=false;
+    lastShot=false;
+  }
+}
+
+let mouseX,mouseY;
+
+canvas.addEventListener("pointermove",e=>{
+  if(!aiming) return;
+  const rect=canvas.getBoundingClientRect();
+  mouseX=e.clientX-rect.left;
+  mouseY=e.clientY-rect.top;
+});
+
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+/* ===== SHOOT ===== */
+canvas.addEventListener("pointerdown",e=>{
+  if(isMoving||gameOver) return;
+
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+
+  const cue=balls.find(b=>b.type==="cue"&&b.alive);
+  if(!cue) return;
+
+  const dx=x-cue.x;
+  const dy=y-cue.y;
+
+  if(Math.sqrt(dx*dx+dy*dy)<radius){
+    aiming=true;
+    startX=cue.x;
+    startY=cue.y;
+    mouseX=x;
+    mouseY=y;
+  }
+});
+
+canvas.addEventListener("pointerup",e=>{
+  if(!aiming) return;
+  aiming=false;
+
+  const cue=balls.find(b=>b.type==="cue"&&b.alive);
+  if(!cue) return;
+
+  cue.vx=(mouseX-startX)*powerScale;
+  cue.vy=(mouseY-startY)*powerScale;
+  lastShot=true;
+});
+</script>
+</body>
+</html>
